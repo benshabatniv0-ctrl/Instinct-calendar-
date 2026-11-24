@@ -1,5 +1,6 @@
 // Declares the bindings available to the Worker and its workerd tests.
 interface Env {
+  // Provided at runtime by the Guard Durable Object (src/guard.ts DurableKv) unless bound as real KV.
   OAUTH_KV: KVNamespace;
   REMINDERS_KV?: KVNamespace;
   GUARD?: DurableObjectNamespace<import("./src/guard").Guard>;

@@ -68,7 +68,7 @@ Cloudflare stores these values as encrypted secrets, outside the generated repos
 
 If you skipped a secret or need to replace one, open **Workers & Pages**, select the Worker, select **Settings**, find **Variables and Secrets**, add or edit the value as a **Secret**, and select **Deploy**.
 
-Cloudflare creates `OAUTH_KV` automatically to store client registrations and authorizations. It does not store calendar events.
+Client registrations, authorizations and the Reminders queue are stored in the Worker's `Guard` Durable Object (SQLite, free plan). No KV namespaces are needed. It does not store calendar events.
 
 ## Connect an MCP client
 

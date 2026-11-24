@@ -6,7 +6,7 @@ import { defaultHandler } from "./authorize";
 import { createCalendarMcpHandler } from "./mcp";
 import { handleApi, isApiRoute } from "./api";
 import { authenticate, calendarAccess, mcpScopesFor } from "./access";
-import { clientRef, guardFor } from "./guard";
+import { clientRef, guardFor, withDurableKv } from "./guard";
 import { handleShortcut, isShortcutRoute } from "./shortcut";
 import { installChatGptMetadataFallback } from "./cimd";
 import { publicError } from "./security";
@@ -22,7 +22,8 @@ class McpApiHandler extends WorkerEntrypoint<Env, AuthProps> {
       return Promise.resolve(new Response("Insufficient scope", { status: 403 }));
     }
     // OAuth clients are bound by the global CALENDAR_ALLOWLIST.
-    return createCalendarMcpHandler(this.env, this.ctx.props.scopes, calendarAccess(this.env))(request, this.env, this.ctx);
+    const env = withDurableKv(this.env);
+    return createCalendarMcpHandler(env, this.ctx.props.scopes, calendarAccess(env))(request, env, this.ctx);
   }
 }
 
@@ -96,8 +97,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 export { Guard } from "./guard";
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, rawEnv: Env, ctx: ExecutionContext): Promise<Response> {
     installChatGptMetadataFallback();
+    const env = withDurableKv(rawEnv);
     try {
       return await route(request, env, ctx);
     } catch (error) {
