@@ -1,5 +1,7 @@
 # Connecting Instinct
 
+> **Current Instinct (November 2026): use the browser console.** Instinct's vault cannot put a password into an HTTP header, but it can fill a website's login form. Save a **Login** in Instinct's Vault (app.instinct.com → Vault → Logins → +) for `https://<your-worker>.workers.dev/app/login`, with username `token` and the API key as the password. Instinct then signs in at `/app/login` and uses the request form at `/app` (method, path, JSON body, confirmation token, etag, idempotency key). Every request goes through the same HTTP API, so the rules below are unchanged. Sessions last 12 hours, and disabling the key in `API_KEYS` ends them at once.
+
 Instinct manages the calendar over the HTTP API. Setup happens in three phases, and your real calendars stay out of reach until phase 3.
 
 1. **Credential.** Create Instinct's key, locked to the temporary `Claude Test` calendar, and hand it to Instinct through its secure credential link.

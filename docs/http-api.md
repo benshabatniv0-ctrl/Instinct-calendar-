@@ -58,6 +58,8 @@ The legacy `API_TOKEN` still works with its original powers: reading, creating, 
 | GET/POST | `/api/reminders` | reminders:read / reminders:write | Unchanged. |
 | GET | `/api/audit[?limit][&keyId]` | audit:read | Recent activity, with no event content. |
 
+Assistants that can only fill login forms can use the browser console instead: sign in at `/app/login` (any username, the key as the password), then send requests from the form at `/app`. See [instinct.md](instinct.md).
+
 If a client cannot send PATCH or DELETE, it can send POST with `X-HTTP-Method-Override: PATCH|DELETE` or `?_method=PATCH|DELETE`.
 
 ## Times
