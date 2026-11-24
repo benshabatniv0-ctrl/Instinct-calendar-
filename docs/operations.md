@@ -21,7 +21,8 @@ Everything runs in Cloudflare, so no personal computer has to stay on. The Worke
 ### Fresh deployment
 
 1. Cloudflare dashboard → **Workers & Pages → Create → Import a repository** → choose your fork → keep the defaults → **Deploy**.
-2. The first build may fail with "required secrets have not been set". Add them (next section) and retry the build.
+2. The first deploy succeeds without secrets. The Worker stays locked until you add them (next section): approvals are refused, the API is disabled, and nothing reaches iCloud.
+   If a build ever fails with "a namespace with this account ID and title already exists", delete the leftover `…-oauth-kv` and `…-reminders-kv` namespaces under Storage & databases → Workers KV, then retry.
 3. Turn **off** "Protect with Cloudflare Access" for the Worker.
 
 ### From a terminal (optional)
