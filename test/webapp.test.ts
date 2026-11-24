@@ -89,6 +89,13 @@ describe("browser console", () => {
     env = makeEnv({ instinct: { token: TOKEN, scopes: ["events:read", "events:create", "events:update", "events:delete"] } });
   });
 
+  it("accepts a key that contains spaces or arrives with stray whitespace", async () => {
+    env = makeEnv({ spaced: { token: "abcd-efgh-ijkl abcd-efgh-ijkl xyz", scopes: ["events:read"] } });
+    expect((await send("/app/login", { ip: "192.0.2.50", form: { username: "token", password: "abcd-efgh-ijkl abcd-efgh-ijkl xyz" } })).status).toBe(303);
+    expect((await send("/app/login", { ip: "192.0.2.50", form: { username: "token", password: " abcd-efgh-ijkl abcd-efgh-ijkl xyz\n" } })).status).toBe(303);
+    env = makeEnv({ instinct: { token: TOKEN, scopes: ["events:read", "events:create", "events:update", "events:delete"] } });
+  });
+
   it("limits password guessing", async () => {
     let status = 0;
     for (let index = 0; index < 11; index += 1) status = (await send("/app/login", { ip: "198.51.100.200", form: { username: "x", password: "nope-nope-nope-nope-nope-nope" } })).status;

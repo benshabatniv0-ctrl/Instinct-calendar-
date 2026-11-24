@@ -118,6 +118,12 @@ export type AuthResult =
 // Resolves the presented bearer (or Basic password) to a principal. Every configured key is compared
 // in constant time, so timing does not reveal which key names exist.
 export async function authenticate(request: Request, env: AccessEnv, now = Date.now()): Promise<AuthResult> {
+  return authenticateSecret(presentedSecret(request) ?? (request.headers.get("x-api-key")?.trim() || undefined), env, now);
+}
+
+// Checks a secret exactly as given (a login form may submit one containing spaces, which an
+// Authorization header cannot carry).
+export async function authenticateSecret(presentedValue: string | undefined, env: AccessEnv, now = Date.now()): Promise<AuthResult> {
   let keys: Map<string, KeyConfig>;
   try {
     keys = parseApiKeys(env.API_KEYS);
@@ -129,7 +135,7 @@ export async function authenticate(request: Request, env: AccessEnv, now = Date.
   if (keys.size === 0 && !legacy) {
     return { ok: false, reason: "disabled", message: "The HTTP API is disabled. Set API_KEYS (or API_TOKEN) on the Worker to enable it." };
   }
-  const presented = presentedSecret(request) ?? (request.headers.get("x-api-key")?.trim() || undefined);
+  const presented = presentedValue;
   if (!presented) return { ok: false, reason: "missing", message: "Send Authorization: Bearer <token> (or X-API-Key: <token>)." };
 
   const presentedHash = await sha256Hex(presented);
