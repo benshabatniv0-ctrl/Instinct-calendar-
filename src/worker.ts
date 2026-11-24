@@ -5,6 +5,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { defaultHandler } from "./authorize";
 import { createCalendarMcpHandler } from "./mcp";
 import { handleApi, isApiRoute } from "./api";
+import { handleWebApp, isWebAppRoute } from "./webapp";
 import { authenticate, calendarAccess, mcpScopesFor } from "./access";
 import { clientRef, guardFor, withDurableKv } from "./guard";
 import { handleShortcut, isShortcutRoute } from "./shortcut";
@@ -83,6 +84,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   const url = new URL(request.url);
   if (isShortcutRoute(url)) return handleShortcut(request, env);
   if (isApiRoute(url)) return handleApi(request, env, ctx);
+  if (isWebAppRoute(url)) return handleWebApp(request, env, ctx);
   if (url.pathname === "/mcp" && request.headers.has("authorization")) {
     const handled = await mcpKeyHandler(request, env, ctx);
     if (handled) return handled;

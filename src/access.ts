@@ -217,3 +217,22 @@ export function mcpScopesFor(principal: ApiPrincipal): string[] {
   }
   return scopes;
 }
+
+// Rebuilds a principal from a key name, for browser sessions. Returns undefined when the key has since
+// been removed, disabled or expired, so revoking a key also ends its sessions.
+export function principalForKeyId(env: AccessEnv, keyId: string, now = Date.now()): ApiPrincipal | undefined {
+  if (keyId === "legacy-api-token") {
+    return env.API_TOKEN && env.API_TOKEN.length >= MIN_TOKEN_LENGTH
+      ? { keyId, scopes: new Set(LEGACY_SCOPES), mcp: true, legacy: true }
+      : undefined;
+  }
+  let keys: Map<string, KeyConfig>;
+  try {
+    keys = parseApiKeys(env.API_KEYS);
+  } catch {
+    return undefined;
+  }
+  const config = keys.get(keyId);
+  if (!config || config.disabled || (config.expiresAt && Date.parse(config.expiresAt) <= now)) return undefined;
+  return { keyId, scopes: new Set(config.scopes), calendars: config.calendars, mcp: config.mcp ?? false, legacy: false };
+}

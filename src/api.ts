@@ -1109,13 +1109,15 @@ export function isApiRoute(url: URL): boolean {
   return url.pathname === "/api" || url.pathname.startsWith("/api/");
 }
 
-export async function handleApi(request: Request, env: ApiEnv, executionContext?: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
+// `signedIn` is set by the browser console (src/webapp.ts), which has already verified a session
+// for this principal; every other caller authenticates with the request's own credentials.
+export async function handleApi(request: Request, env: ApiEnv, executionContext?: Pick<ExecutionContext, "waitUntil">, signedIn?: ApiPrincipal): Promise<Response> {
   const url = new URL(request.url);
   if (!isApiRoute(url)) return new Response("Not found", { status: 404 });
   const started = Date.now();
   const guard = guardFor(env);
 
-  const auth = await authenticate(request, env);
+  const auth = signedIn ? { ok: true as const, principal: signedIn } : await authenticate(request, env);
   if (!auth.ok) {
     if (auth.reason === "disabled" || auth.reason === "misconfigured") return failure(new ApiError(503, "api_disabled", auth.message));
     if (guard) {
