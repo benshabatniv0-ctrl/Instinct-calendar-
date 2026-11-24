@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "apple-calendar-mcp",
+  "main": "src/worker.ts",
+  "workers_dev": true,
+  "preview_urls": false,
+  "keep_vars": true,
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    // Israel time, including its daylight-saving rules. All local times sent to /api are read in this zone
+    // unless the target calendar publishes its own zone or the request names one.
+    "CALENDAR_TIME_ZONE": "Asia/Jerusalem"
+  },
+  "secrets": {
+    "required": ["ICLOUD_USERNAME", "ICLOUD_APP_PASSWORD", "APPROVAL_PASSWORD"]
+  },
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }, { "binding": "REMINDERS_KV" }],
+  // Rate limits, single-use confirmation tokens, idempotency records and the audit log.
+  // SQLite-backed Durable Objects are available on the Workers Free plan.
+  "durable_objects": {
+    "bindings": [{ "name": "GUARD", "class_name": "Guard" }]
+  },
+  "migrations": [{ "tag": "v1-guard", "new_sqlite_classes": ["Guard"] }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
