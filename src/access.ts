@@ -24,6 +24,9 @@ export type ApiScope = (typeof API_SCOPES)[number];
 
 export interface ApiPrincipal {
   keyId: string;
+  // Short digest of the key's current secret: browser sessions record it, so re-issuing or changing a
+  // key ends the sessions opened with the old one.
+  credentialRef?: string;
   scopes: ReadonlySet<ApiScope>;
   calendars?: readonly string[] | undefined;
   mcp: boolean;
@@ -50,7 +53,62 @@ interface KeyConfig {
   disabled?: boolean;
 }
 
-export type AccessEnv = Partial<Pick<Env, "API_TOKEN" | "API_KEYS" | "CALENDAR_ALLOWLIST">>;
+export type AccessEnv = Partial<Pick<Env, "API_TOKEN" | "API_KEYS" | "CALENDAR_ALLOWLIST" | "GUARD">>;
+
+// Keys created on the bridge's own setup page (/app/setup) are stored as SHA-256 digests in the Guard
+// Durable Object, so they never have to be pasted into Cloudflare. They work alongside API_KEYS.
+const MANAGED_NS = "managed-keys";
+const MANAGED_ENTRY = "all";
+
+interface ManagedKeyStore {
+  kvGet(ns: string, key: string): Promise<string | null>;
+  kvPut(ns: string, key: string, value: string, expires: number | null): Promise<void>;
+}
+
+function managedStore(env: AccessEnv): ManagedKeyStore | undefined {
+  if (!env.GUARD) return undefined;
+  return env.GUARD.get(env.GUARD.idFromName("kv")) as unknown as ManagedKeyStore;
+}
+
+export async function loadManagedKeys(env: AccessEnv): Promise<Map<string, KeyConfig>> {
+  const store = managedStore(env);
+  if (!store) return new Map();
+  try {
+    const raw = await store.kvGet(MANAGED_NS, MANAGED_ENTRY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as Record<string, KeyConfig>;
+    return new Map(Object.entries(parsed).filter(([keyId, config]) => KEY_ID.test(keyId) && typeof config.sha256 === "string" && Array.isArray(config.scopes)));
+  } catch (error) {
+    console.error("managed_keys_unreadable", { reason: (error as Error).message });
+    return new Map();
+  }
+}
+
+// Creates (or replaces) a managed key and returns its token. The token is never stored.
+export async function issueManagedKey(env: AccessEnv, keyId: string, scopes: ApiScope[]): Promise<string> {
+  const store = managedStore(env);
+  if (!store) throw new Error("The Guard Durable Object is not bound.");
+  if (!KEY_ID.test(keyId)) throw new Error("Invalid key name.");
+  const bytes = crypto.getRandomValues(new Uint8Array(30));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const token = btoa(binary).replaceAll("+", "A").replaceAll("/", "B").replace(/=+$/, "");
+  const keys = await loadManagedKeys(env);
+  keys.set(keyId, { sha256: await sha256Hex(token), scopes });
+  await store.kvPut(MANAGED_NS, MANAGED_ENTRY, JSON.stringify(Object.fromEntries(keys)), null);
+  console.info("managed_key_issued", { keyId });
+  return token;
+}
+
+export async function revokeManagedKey(env: AccessEnv, keyId: string): Promise<boolean> {
+  const store = managedStore(env);
+  if (!store) return false;
+  const keys = await loadManagedKeys(env);
+  const existed = keys.delete(keyId);
+  await store.kvPut(MANAGED_NS, MANAGED_ENTRY, JSON.stringify(Object.fromEntries(keys)), null);
+  if (existed) console.info("managed_key_revoked", { keyId });
+  return existed;
+}
 
 function asStringArray(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
@@ -124,15 +182,18 @@ export async function authenticate(request: Request, env: AccessEnv, now = Date.
 // Checks a secret exactly as given (a login form may submit one containing spaces, which an
 // Authorization header cannot carry).
 export async function authenticateSecret(presentedValue: string | undefined, env: AccessEnv, now = Date.now()): Promise<AuthResult> {
-  let keys: Map<string, KeyConfig>;
+  let configured: Map<string, KeyConfig>;
   try {
-    keys = parseApiKeys(env.API_KEYS);
+    configured = parseApiKeys(env.API_KEYS);
   } catch (error) {
     console.error("api_keys_invalid", { reason: (error as Error).message });
     return { ok: false, reason: "misconfigured", message: "The API key configuration on the Worker is invalid. The owner must fix API_KEYS." };
   }
+  const managed = await loadManagedKeys(env);
+  // Managed keys first, so a key re-issued on /app/setup wins over a same-named API_KEYS entry.
+  const keys: Array<[string, KeyConfig]> = [...managed, ...configured];
   const legacy = env.API_TOKEN && env.API_TOKEN.length >= MIN_TOKEN_LENGTH ? env.API_TOKEN : undefined;
-  if (keys.size === 0 && !legacy) {
+  if (keys.length === 0 && !legacy) {
     return { ok: false, reason: "disabled", message: "The HTTP API is disabled. Set API_KEYS (or API_TOKEN) on the Worker to enable it." };
   }
   const presented = presentedValue;
@@ -155,6 +216,7 @@ export async function authenticateSecret(presentedValue: string | undefined, env
       ok: true,
       principal: {
         keyId: matched.keyId,
+        credentialRef: (matched.config.sha256 ?? (await sha256Hex(matched.config.token ?? ""))).slice(0, 16),
         scopes: new Set(matched.config.scopes),
         calendars: matched.config.calendars,
         mcp: matched.config.mcp ?? false,
@@ -226,7 +288,9 @@ export function mcpScopesFor(principal: ApiPrincipal): string[] {
 
 // Rebuilds a principal from a key name, for browser sessions. Returns undefined when the key has since
 // been removed, disabled or expired, so revoking a key also ends its sessions.
-export function principalForKeyId(env: AccessEnv, keyId: string, now = Date.now()): ApiPrincipal | undefined {
+export async function principalForKeyId(env: AccessEnv, keyId: string, now = Date.now()): Promise<ApiPrincipal | undefined> {
+  const managed = (await loadManagedKeys(env)).get(keyId);
+  if (managed) return { keyId, credentialRef: (managed.sha256 ?? "").slice(0, 16), scopes: new Set(managed.scopes), calendars: managed.calendars, mcp: false, legacy: false };
   if (keyId === "legacy-api-token") {
     return env.API_TOKEN && env.API_TOKEN.length >= MIN_TOKEN_LENGTH
       ? { keyId, scopes: new Set(LEGACY_SCOPES), mcp: true, legacy: true }
@@ -240,5 +304,5 @@ export function principalForKeyId(env: AccessEnv, keyId: string, now = Date.now(
   }
   const config = keys.get(keyId);
   if (!config || config.disabled || (config.expiresAt && Date.parse(config.expiresAt) <= now)) return undefined;
-  return { keyId, scopes: new Set(config.scopes), calendars: config.calendars, mcp: config.mcp ?? false, legacy: false };
+  return { keyId, credentialRef: (config.sha256 ?? (await sha256Hex(config.token ?? ""))).slice(0, 16), scopes: new Set(config.scopes), calendars: config.calendars, mcp: config.mcp ?? false, legacy: false };
 }

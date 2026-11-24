@@ -102,3 +102,29 @@ describe("browser console", () => {
     expect(status).toBe(429);
   });
 });
+
+describe("owner key setup page", () => {
+  it("creates a key that works, replaces it on re-issue, and can revoke it", async () => {
+    env = makeEnv({});
+    expect((await send("/app/setup", { ip: "192.0.2.77", form: { approval: "wrong", name: "instinct", action: "create" } })).status).toBe(401);
+    const created = await (await send("/app/setup", { ip: "192.0.2.77", form: { approval: "p".repeat(30), name: "instinct", action: "create" } })).text();
+    const token = /<pre id="token"[^>]*>([A-Za-z0-9]+)<\/pre>/.exec(created)![1]!;
+    expect(token.length).toBeGreaterThanOrEqual(40);
+    const login = await send("/app/login", { ip: "192.0.2.78", form: { username: "token", password: token } });
+    expect(login.status).toBe(303);
+    const cookie = sessionFrom(login);
+    expect((await send("/app", { cookie })).status).toBe(200);
+    const apiResponse = await worker.fetch(new Request(`${BASE}/api/time`, { headers: { authorization: `Bearer ${token}` } }), env, ctx);
+    expect(apiResponse.status).toBe(200);
+
+    const reissued = await (await send("/app/setup", { ip: "192.0.2.77", form: { approval: "p".repeat(30), name: "instinct", action: "create" } })).text();
+    const second = /<pre id="token"[^>]*>([A-Za-z0-9]+)<\/pre>/.exec(reissued)![1]!;
+    expect((await send("/app/login", { ip: "192.0.2.78", form: { username: "token", password: token } })).status).toBe(401);
+    expect((await send("/app", { cookie })).status).toBe(303);
+    expect((await send("/app/login", { ip: "192.0.2.78", form: { username: "token", password: second } })).status).toBe(303);
+
+    await send("/app/setup", { ip: "192.0.2.77", form: { approval: "p".repeat(30), name: "instinct", action: "revoke" } });
+    expect((await send("/app/login", { ip: "192.0.2.78", form: { username: "token", password: second } })).status).toBe(401);
+    env = makeEnv({ instinct: { token: TOKEN, scopes: ["events:read", "events:create", "events:update", "events:delete"] } });
+  });
+});

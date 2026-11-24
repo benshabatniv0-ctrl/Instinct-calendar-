@@ -12,7 +12,7 @@
 // (scopes, calendar allowlist, confirmations, ETags, rate limits, audit) apply unchanged, because each
 // request goes through handleApi.
 
-import { authenticateSecret, principalForKeyId, type ApiPrincipal } from "./access";
+import { authenticateSecret, issueManagedKey, principalForKeyId, revokeManagedKey, type ApiPrincipal } from "./access";
 import { handleApi, type ApiEnv } from "./api";
 import { secretsEqual } from "./authorize";
 import { clientRef, guardFor } from "./guard";
@@ -26,6 +26,7 @@ interface Session {
   k: string;
   exp: number;
   c: string;
+  r?: string | undefined;
 }
 
 function base64Url(bytes: Uint8Array): string {
@@ -69,8 +70,9 @@ async function readSession(request: Request, env: ApiEnv): Promise<{ session: Se
     const session = JSON.parse(new TextDecoder().decode(fromBase64Url(payload))) as Session;
     if (typeof session.k !== "string" || typeof session.c !== "string" || typeof session.exp !== "number") return undefined;
     if (session.exp * 1000 <= Date.now()) return undefined;
-    const principal = principalForKeyId(env, session.k);
-    return principal ? { session, principal } : undefined;
+    const principal = await principalForKeyId(env, session.k);
+    if (!principal || (principal.credentialRef ?? "") !== (session.r ?? "")) return undefined;
+    return { session, principal };
   } catch {
     return undefined;
   }
@@ -161,7 +163,7 @@ export function isWebAppRoute(url: URL): boolean {
   return url.pathname === "/app" || url.pathname.startsWith("/app/");
 }
 
-export async function handleWebApp(request: Request, env: ApiEnv, ctx?: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
+export async function handleWebApp(request: Request, env: ApiEnv & Partial<Pick<Env, "APPROVAL_PASSWORD">>, ctx?: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/app";
   if (url.protocol !== "https:" && url.hostname !== "localhost") return new Response("HTTPS required", { status: 400 });
@@ -184,11 +186,13 @@ export async function handleWebApp(request: Request, env: ApiEnv, ctx?: Pick<Exe
     if (!auth.ok && password.trim() !== password) auth = await authenticateSecret(password.trim(), env);
     console.info("web_login_attempt", { ok: auth.ok, reason: auth.ok ? undefined : auth.reason, usernameFilled: Boolean(form && field(form, "username")) });
     if (!auth.ok) return loginPage(auth.reason === "disabled" || auth.reason === "misconfigured" ? auth.message : "That password is not valid.", 401);
-    const session: Session = { k: auth.principal.keyId, exp: Math.floor(Date.now() / 1000) + SESSION_SECONDS, c: base64Url(crypto.getRandomValues(new Uint8Array(18))) };
+    const session: Session = { k: auth.principal.keyId, r: auth.principal.credentialRef, exp: Math.floor(Date.now() / 1000) + SESSION_SECONDS, c: base64Url(crypto.getRandomValues(new Uint8Array(18))) };
     const cookie = `${COOKIE}=${await encodeSession(env, session)}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}`;
     console.info("web_login", { keyId: auth.principal.keyId });
     return redirect("/app", cookie);
   }
+
+  if (path === "/app/setup") return handleSetup(request, env);
 
   const signedIn = await readSession(request, env);
   if (!signedIn) return request.method === "GET" ? redirect("/app/login") : loginPage("Your session ended. Sign in again.", 401);
@@ -232,4 +236,36 @@ export async function handleWebApp(request: Request, env: ApiEnv, ctx?: Pick<Exe
     state.result = { status: response.status, text, ...(done !== undefined ? { done } : {}) };
   }
   return consolePage(signedIn.session, signedIn.principal, state);
+}
+
+// Owner page: creates an API key inside the bridge and shows it once, so it never has to be pasted into
+// Cloudflare. Protected by APPROVAL_PASSWORD (the same password that approves MCP clients), with the
+// same attempt limit as the approval page.
+const SETUP_SCOPES = ["events:read", "events:create", "events:update", "events:delete"] as const;
+
+function setupPage(message?: string, status = 200): Response {
+  return page("Calendar bridge — create key", `<h1>Create an API key</h1><p>Creates a new key for an assistant and shows it to you <b>once</b>. Creating a key with the same name again replaces the old key immediately. The key can read, create, change and delete events (deletes still need your confirmation).</p>${message ? `<p class="status bad" role="alert">${escape(message)}</p>` : ""}<form method="post" action="/app/setup"><label for="approval">Approval password (APPROVAL_PASSWORD from Cloudflare)</label><input id="approval" name="approval" type="password" autocomplete="off" required><label for="name">Key name</label><input id="name" name="name" value="instinct" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,39}"><label for="action">Action</label><select id="action" name="action"><option value="create">Create a new key (replaces an existing one with this name)</option><option value="revoke">Revoke this key</option></select><button type="submit">Continue</button></form>`, status);
+}
+
+async function handleSetup(request: Request, env: ApiEnv & Partial<Pick<Env, "APPROVAL_PASSWORD">>): Promise<Response> {
+  if (request.method === "GET") return setupPage();
+  if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  if (!env.APPROVAL_PASSWORD) return setupPage("APPROVAL_PASSWORD is not set on the Worker.", 503);
+  const guard = guardFor(env);
+  if (!guard) return setupPage("The Guard Durable Object is not bound.", 503);
+  const limited = await guard.checkRate([{ key: `approval:${await clientRef(request)}`, limit: 10, windowSeconds: 600 }, { key: "approval:all", limit: 60, windowSeconds: 3600 }]);
+  if (!limited.ok) return setupPage("Too many attempts. Wait a few minutes.", 429);
+  const form = await formOf(request);
+  const raw = form?.get("approval");
+  const approval = typeof raw === "string" ? raw : "";
+  const matches = (await secretsEqual(approval, env.APPROVAL_PASSWORD)) || (approval.trim() !== approval && (await secretsEqual(approval.trim(), env.APPROVAL_PASSWORD)));
+  if (!matches) return setupPage("That approval password is not correct.", 401);
+  const name = form ? field(form, "name") || "instinct" : "instinct";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)) return setupPage("The key name may use letters, digits, - and _.", 400);
+  if (form && field(form, "action") === "revoke") {
+    const existed = await revokeManagedKey(env, name);
+    return page("Calendar bridge — key revoked", `<h1>Key ${existed ? "revoked" : "not found"}</h1><p>${existed ? `The key <b>${escape(name)}</b> no longer works, and its sessions have ended.` : `No key named <b>${escape(name)}</b> was created on this page.`}</p>`);
+  }
+  const token = await issueManagedKey(env, name, [...SETUP_SCOPES]);
+  return page("Calendar bridge — your new key", `<h1>Your new key: ${escape(name)}</h1><p><b>Copy it now.</b> It is shown only once and is not stored anywhere in readable form.</p><pre id="token" style="font-size:18px;user-select:all">${escape(token)}</pre><ol><li>Tap and hold the key above, then choose <b>Copy</b>. It has only letters and digits.</li><li>Check it: open <a href="/app/login">/app/login</a>, paste it as the password, and sign in.</li><li>Give it to the assistant through its secure link or vault (username: <code>token</code>).</li></ol><p class="hint">Any older key with this name stopped working just now.</p>`, 200, { "cache-control": "no-store" });
 }
