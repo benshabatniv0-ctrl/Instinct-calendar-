@@ -12,7 +12,7 @@
 // (scopes, calendar allowlist, confirmations, ETags, rate limits, audit) apply unchanged, because each
 // request goes through handleApi.
 
-import { authenticate, principalForKeyId, type ApiPrincipal } from "./access";
+import { authenticateSecret, principalForKeyId, type ApiPrincipal } from "./access";
 import { handleApi, type ApiEnv } from "./api";
 import { secretsEqual } from "./authorize";
 import { clientRef, guardFor } from "./guard";
@@ -175,9 +175,14 @@ export async function handleWebApp(request: Request, env: ApiEnv, ctx?: Pick<Exe
       if (!limited.ok) return loginPage("Too many sign-in attempts. Wait a few minutes.", 429);
     }
     const form = await formOf(request);
-    const password = form ? field(form, "password") : "";
-    if (!password) return loginPage("Enter the password.", 400);
-    const auth = await authenticate(new Request(url, { headers: { authorization: `Bearer ${password}` } }), env);
+    const raw = form?.get("password");
+    const password = typeof raw === "string" ? raw : "";
+    if (!password.trim()) return loginPage("Enter the password.", 400);
+    // Accept the value exactly as typed, and also without surrounding whitespace that autofill or a
+    // copy-paste can add.
+    let auth = await authenticateSecret(password, env);
+    if (!auth.ok && password.trim() !== password) auth = await authenticateSecret(password.trim(), env);
+    console.info("web_login_attempt", { ok: auth.ok, reason: auth.ok ? undefined : auth.reason, usernameFilled: Boolean(form && field(form, "username")) });
     if (!auth.ok) return loginPage(auth.reason === "disabled" || auth.reason === "misconfigured" ? auth.message : "That password is not valid.", 401);
     const session: Session = { k: auth.principal.keyId, exp: Math.floor(Date.now() / 1000) + SESSION_SECONDS, c: base64Url(crypto.getRandomValues(new Uint8Array(18))) };
     const cookie = `${COOKIE}=${await encodeSession(env, session)}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}`;
