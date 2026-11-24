@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "apple-calendar-mcp",
+  "name": "instinct-calendar",
   "main": "src/worker.ts",
   "workers_dev": true,
   "preview_urls": false,
