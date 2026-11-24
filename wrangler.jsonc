@@ -12,9 +12,9 @@
     // unless the target calendar publishes its own zone or the request names one.
     "CALENDAR_TIME_ZONE": "Asia/Jerusalem"
   },
-  "secrets": {
-    "required": ["ICLOUD_USERNAME", "ICLOUD_APP_PASSWORD", "APPROVAL_PASSWORD"]
-  },
+  // Secrets (ICLOUD_USERNAME, ICLOUD_APP_PASSWORD, APPROVAL_PASSWORD, API_KEYS) are added in the dashboard
+  // after the first deploy. They are not declared as required so that first deploy can succeed; until they
+  // exist the Worker fails closed (no approvals, API disabled, no iCloud access).
   "kv_namespaces": [{ "binding": "OAUTH_KV" }, { "binding": "REMINDERS_KV" }],
   // Rate limits, single-use confirmation tokens, idempotency records and the audit log.
   // SQLite-backed Durable Objects are available on the Workers Free plan.
