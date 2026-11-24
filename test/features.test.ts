@@ -230,7 +230,7 @@ describe("worker routing for API keys on /mcp", () => {
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream", host: "calendar.example.workers.dev", origin: "https://calendar.example.workers.dev" },
     body: initialize,
   });
-  const baseEnv = { ICLOUD_USERNAME: "o@example.com", ICLOUD_APP_PASSWORD: "pw", CALENDAR_TIME_ZONE: Z, APPROVAL_PASSWORD: "p".repeat(30), OAUTH_KV: (workerEnv as unknown as Env).OAUTH_KV, GUARD: (workerEnv as unknown as Env).GUARD };
+  const baseEnv = { ICLOUD_USERNAME: "o@example.com", ICLOUD_APP_PASSWORD: "pw", CALENDAR_TIME_ZONE: Z, APPROVAL_PASSWORD: "p".repeat(30), GUARD: (workerEnv as unknown as Env).GUARD };
 
   it("serves MCP to keys that opt in and leaves others to OAuth", async () => {
     const optedIn = { ...baseEnv, API_KEYS: JSON.stringify({ hark: { token, scopes: ["events:read"], mcp: true } }) } as unknown as Env;
@@ -246,5 +246,47 @@ describe("worker routing for API keys on /mcp", () => {
       status = (await worker.fetch(new Request("https://calendar.example.workers.dev/authorize?x=1", { method: "POST", headers: { "cf-connecting-ip": "198.51.100.7" }, body: new FormData() }), env, ctx)).status;
     }
     expect(status).toBe(429);
+  });
+});
+
+describe("KV storage backed by the Guard Durable Object", () => {
+  it("supports get, json, expiry, delete and paginated prefix listing", async () => {
+    const { DurableKv } = await import("../src/guard");
+    const guard = (workerEnv as unknown as Env).GUARD!;
+    const kv = new DurableKv(guard.get(guard.idFromName(`kv-test-${crypto.randomUUID()}`)) as never, "t");
+    await kv.put("client:a", JSON.stringify({ id: "a" }));
+    await kv.put("client:b", "2");
+    await kv.put("client:c", "3", { expirationTtl: 3600 });
+    await kv.put("grant:x", "4");
+    expect(await kv.get("client:b")).toBe("2");
+    expect(await kv.get("client:a", { type: "json" })).toEqual({ id: "a" });
+    expect(await kv.get("missing")).toBeNull();
+    const first = await kv.list({ prefix: "client:", limit: 2 });
+    expect(first.keys.map((key) => key.name)).toEqual(["client:a", "client:b"]);
+    expect(first.list_complete).toBe(false);
+    const second = await kv.list({ prefix: "client:", limit: 2, cursor: (first as { cursor: string }).cursor });
+    expect(second.keys.map((key) => key.name)).toEqual(["client:c"]);
+    expect(second.list_complete).toBe(true);
+    await kv.delete("client:b");
+    expect(await kv.get("client:b")).toBeNull();
+    await kv.put("old", "v", { expiration: Math.floor(Date.now() / 1000) - 1 });
+    expect(await kv.get("old")).toBeNull();
+  });
+
+  it("lets the OAuth provider register a client and show the approval page without KV bindings", async () => {
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const env = { ICLOUD_USERNAME: "o@example.com", ICLOUD_APP_PASSWORD: "pw", CALENDAR_TIME_ZONE: Z, APPROVAL_PASSWORD: "p".repeat(30), GUARD: (workerEnv as unknown as Env).GUARD } as unknown as Env;
+    const registered = await worker.fetch(new Request("https://calendar.example.workers.dev/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Test Client", redirect_uris: ["https://client.example.com/callback"], token_endpoint_auth_method: "none" }),
+    }), env, ctx);
+    expect(registered.status).toBe(201);
+    const { client_id: clientId } = (await registered.json()) as { client_id: string };
+    const authorize = new URL("https://calendar.example.workers.dev/authorize");
+    for (const [key, value] of Object.entries({ response_type: "code", client_id: clientId, redirect_uri: "https://client.example.com/callback", scope: "calendar:read", state: "s", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256" })) authorize.searchParams.set(key, value);
+    const page = await worker.fetch(new Request(authorize), env, ctx);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("Test Client");
   });
 });

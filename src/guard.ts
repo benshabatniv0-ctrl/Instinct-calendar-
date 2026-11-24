@@ -38,6 +38,13 @@ export interface AuditEntry {
   durationMs?: number | undefined;
 }
 
+export interface KvApi {
+  kvGet(ns: string, key: string): Promise<string | null>;
+  kvPut(ns: string, key: string, value: string, expires: number | null): Promise<void>;
+  kvDelete(ns: string, key: string): Promise<void>;
+  kvList(ns: string, prefix: string, limit: number, after: string): Promise<Array<{ name: string; expiration?: number }>>;
+}
+
 export interface GuardApi {
   checkRate(rules: RateRule[], now?: number): Promise<RateResult>;
   consumeNonce(nonce: string, expiresAtSeconds: number, now?: number): Promise<boolean>;
@@ -51,7 +58,7 @@ export interface GuardApi {
 const AUDIT_RETENTION_DAYS = 90;
 const AUDIT_MAX_ROWS = 5000;
 
-export class Guard extends DurableObject<Env> implements GuardApi {
+export class Guard extends DurableObject<Env> implements GuardApi, KvApi {
   private readonly sql: SqlStorage;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -62,6 +69,35 @@ export class Guard extends DurableObject<Env> implements GuardApi {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS idem (key TEXT PRIMARY KEY, hash TEXT NOT NULL, status INTEGER, body TEXT, expires INTEGER NOT NULL)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, key_id TEXT NOT NULL, entry TEXT NOT NULL)`);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS audit_at ON audit (at)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS kv (ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, expires INTEGER, PRIMARY KEY (ns, key))`);
+  }
+
+  // Key-value storage used in place of Workers KV (see DurableKv below).
+  async kvGet(ns: string, key: string): Promise<string | null> {
+    const row = this.sql.exec<{ value: string; expires: number | null }>(`SELECT value, expires FROM kv WHERE ns = ? AND key = ?`, ns, key).toArray()[0];
+    if (!row) return null;
+    if (row.expires !== null && row.expires <= Math.floor(Date.now() / 1000)) {
+      this.sql.exec(`DELETE FROM kv WHERE ns = ? AND key = ?`, ns, key);
+      return null;
+    }
+    return row.value;
+  }
+
+  async kvPut(ns: string, key: string, value: string, expires: number | null): Promise<void> {
+    this.sql.exec(`INSERT INTO kv (ns, key, value, expires) VALUES (?, ?, ?, ?) ON CONFLICT(ns, key) DO UPDATE SET value = excluded.value, expires = excluded.expires`, ns, key, value, expires);
+    if (Math.random() < 0.02) this.sql.exec(`DELETE FROM kv WHERE expires IS NOT NULL AND expires <= ?`, Math.floor(Date.now() / 1000));
+  }
+
+  async kvDelete(ns: string, key: string): Promise<void> {
+    this.sql.exec(`DELETE FROM kv WHERE ns = ? AND key = ?`, ns, key);
+  }
+
+  async kvList(ns: string, prefix: string, limit: number, after: string): Promise<Array<{ name: string; expiration?: number }>> {
+    const now = Math.floor(Date.now() / 1000);
+    return this.sql.exec<{ key: string; expires: number | null }>(
+      `SELECT key, expires FROM kv WHERE ns = ? AND key > ? AND substr(key, 1, ?) = ? AND (expires IS NULL OR expires > ?) ORDER BY key LIMIT ?`,
+      ns, after, prefix.length, prefix, now, limit,
+    ).toArray().map((row) => (row.expires === null ? { name: row.key } : { name: row.key, expiration: row.expires }));
   }
 
   private prune(now: number): void {
@@ -154,4 +190,52 @@ export async function auditRef(value: string | undefined): Promise<string | unde
 
 export async function clientRef(request: Request): Promise<string> {
   return (await auditRef(request.headers.get("cf-connecting-ip") ?? "unknown")) ?? "unknown";
+}
+
+// A Workers KV-compatible namespace stored in the Guard Durable Object. Workers Builds' automatic KV
+// provisioning fails on retries ("a namespace with this title already exists"), so the Worker keeps its
+// small OAuth and Reminders state here instead and needs no KV namespaces at all. It implements the
+// subset of the KV API that the OAuth provider and the Reminders code use.
+export class DurableKv {
+  constructor(private readonly store: KvApi, private readonly ns: string) {}
+
+  async get(key: string, options?: "text" | "json" | { type?: "text" | "json" }): Promise<unknown> {
+    const value = await this.store.kvGet(this.ns, key);
+    const type = typeof options === "string" ? options : options?.type;
+    if (value === null || type !== "json") return value;
+    return JSON.parse(value);
+  }
+
+  async put(key: string, value: string, options?: { expirationTtl?: number; expiration?: number }): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const expires = options?.expiration ?? (options?.expirationTtl ? now + Math.max(60, Math.floor(options.expirationTtl)) : null);
+    await this.store.kvPut(this.ns, key, String(value), expires);
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.store.kvDelete(this.ns, key);
+  }
+
+  async list(options: { prefix?: string; limit?: number; cursor?: string } = {}) {
+    const limit = Math.min(1000, Math.max(1, options.limit ?? 1000));
+    const after = options.cursor ? decodeURIComponent(atob(options.cursor)) : "";
+    const keys = await this.store.kvList(this.ns, options.prefix ?? "", limit + 1, after);
+    const page = keys.slice(0, limit);
+    const complete = keys.length <= limit;
+    const last = page.at(-1)?.name;
+    return complete || !last
+      ? { keys: page, list_complete: true as const, cacheStatus: null }
+      : { keys: page, list_complete: false as const, cursor: btoa(encodeURIComponent(last)), cacheStatus: null };
+  }
+}
+
+// Supplies OAUTH_KV and REMINDERS_KV from the Guard unless real KV bindings are configured.
+export function withDurableKv<T extends { GUARD?: DurableObjectNamespace<Guard> | undefined; OAUTH_KV?: unknown; REMINDERS_KV?: unknown }>(env: T): T {
+  if (!env.GUARD || (env.OAUTH_KV && env.REMINDERS_KV)) return env;
+  const store = env.GUARD.get(env.GUARD.idFromName("kv")) as unknown as KvApi;
+  return {
+    ...env,
+    OAUTH_KV: env.OAUTH_KV ?? new DurableKv(store, "oauth"),
+    REMINDERS_KV: env.REMINDERS_KV ?? new DurableKv(store, "reminders"),
+  };
 }
